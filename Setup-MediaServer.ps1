@@ -37,7 +37,8 @@
       <BackupRoot>\Jellyfin\          data tree
       <BackupRoot>\clonarr\           /config tree
 
-    No restore happens unless this is supplied.
+    Defaults to the current directory, so dropping the backup archives next to
+    this script is enough. Use -SkipRestore to opt out.
 
 .PARAMETER SkipDocker
     Skip WSL, Docker Desktop, and all container steps.
@@ -61,7 +62,7 @@ param(
     [string]$MediaRoot          = (Join-Path $env:USERPROFILE 'Downloads\data'),
     [string]$TimeZone           = 'Africa/Lagos',
     [string]$ClonarrConfigPath,
-    [string]$BackupRoot,
+    [string]$BackupRoot         = (Get-Location).Path,
     [switch]$SkipDocker,
     [switch]$SkipRestore
 )
@@ -104,7 +105,8 @@ function Install-WingetPackage {
     #>
     param(
         [Parameter(Mandatory)][string]$Id,
-        [string]$Name = $Id
+        [string]$Name = $Id,
+        [string]$Location
     )
 
     winget list --id $Id --exact --accept-source-agreements 2>$null | Out-Null
@@ -114,9 +116,16 @@ function Install-WingetPackage {
     }
 
     Write-Log "Installing $Name ($Id)..."
-    winget install --id $Id --exact --silent `
-        --accept-package-agreements --accept-source-agreements `
-        --disable-interactivity
+    $wingetArgs = @(
+        'install', '--id', $Id, '--exact', '--silent'
+        '--accept-package-agreements', '--accept-source-agreements'
+        '--disable-interactivity'
+    )
+    if ($Location) {
+        New-Item -ItemType Directory -Path $Location -Force | Out-Null
+        $wingetArgs += @('--location', $Location)
+    }
+    winget @wingetArgs
 
     # 0 = ok | -1978335189 = no applicable upgrade | -1978335135 = already installed
     if (@(0, -1978335189, -1978335135) -notcontains $LASTEXITCODE) {
@@ -127,15 +136,34 @@ function Install-WingetPackage {
     }
 }
 
+function Resolve-LatestPythonId {
+    <#
+        Returns the newest Python.Python.3.<minor> package id winget offers, so
+        no version is pinned in the script. Falls back to a known id if the
+        search yields nothing.
+    #>
+    $fallback = 'Python.Python.3.13'
+    $rows = winget search --id 'Python.Python.' --source winget --accept-source-agreements 2>$null
+    $ids = $rows | Select-String -Pattern 'Python\.Python\.3\.\d+' -AllMatches |
+        ForEach-Object { $_.Matches.Value } | Sort-Object -Unique
+    if (-not $ids) { return $fallback }
+    ($ids | Sort-Object { [int]($_ -replace '.*\.3\.') } -Descending | Select-Object -First 1)
+}
+
+# Bazarr's winget package requires an explicit install location.
+$bazarrLocation = Join-Path $env:ProgramData 'Bazarr'
+
+$pythonId = Resolve-LatestPythonId
+Write-Log "Latest Python package resolved to '$pythonId'."
+
 $packages = [ordered]@{
     'Git.Git'                 = 'Git'
-    'Python.Python.3.11'      = 'Python 3.11'
+    $pythonId                 = 'Python (latest)'
     'qBittorrent.qBittorrent' = 'qBittorrent'
     'TeamRadarr.Radarr'       = 'Radarr'
     'TeamSonarr.Sonarr'       = 'Sonarr'
     'TeamProwlarr.Prowlarr'   = 'Prowlarr'
     'TeamLidarr.Lidarr'       = 'Lidarr'
-    'Morpheus.Bazarr'         = 'Bazarr'
     'Jellyfin.Server'         = 'Jellyfin Server'
 }
 
@@ -143,15 +171,17 @@ foreach ($id in $packages.Keys) {
     Install-WingetPackage -Id $id -Name $packages[$id]
 }
 
+Install-WingetPackage -Id 'Morpheus.Bazarr' -Name 'Bazarr' -Location $bazarrLocation
+
 #endregion
 
 #region 3. Restore backups -----------------------------------------------------
 
-if (-not $BackupRoot) {
-    Write-Log 'No -BackupRoot given - skipping restore.'
-}
-elseif ($SkipRestore) {
+if ($SkipRestore) {
     Write-Log 'SkipRestore set - skipping restore.' 'WARN'
+}
+elseif (-not $BackupRoot) {
+    Write-Log 'No -BackupRoot - skipping restore.'
 }
 elseif (-not (Test-Path -LiteralPath $BackupRoot)) {
     Write-Log "BackupRoot '$BackupRoot' not found - skipping restore." 'WARN'
@@ -167,7 +197,7 @@ else {
         Prowlarr = Join-Path $env:ProgramData 'Prowlarr'
         Lidarr   = Join-Path $env:ProgramData 'Lidarr'
         Whisparr = Join-Path $env:ProgramData 'Whisparr'
-        Bazarr   = Join-Path $env:ProgramData 'Bazarr'
+        Bazarr   = Join-Path $bazarrLocation 'data'
     }
     foreach ($app in $zipApps.Keys) {
         Restore-ZipBackup -AppName $app -DataDir $zipApps[$app] -BackupRoot $BackupRoot
@@ -192,15 +222,45 @@ if ($SkipDocker) {
     return
 }
 
-if (-not (Test-CommandExists wsl)) {
-    Write-Log 'Installing WSL (a reboot may be required afterwards)...'
-    wsl --install --no-launch
+$rebootNeeded = $false
+
+# wsl.exe ships as a stub on every modern Windows even with nothing enabled, so
+# "is wsl on PATH" is not a real check. Verify the platform actually responds,
+# and make sure both features Docker's WSL2 backend needs are enabled.
+$eap = $ErrorActionPreference
+$ErrorActionPreference = 'SilentlyContinue'
+wsl.exe --status 2>&1 | Out-Null
+$wslReady = ($LASTEXITCODE -eq 0)
+$ErrorActionPreference = $eap
+
+foreach ($feat in 'Microsoft-Windows-Subsystem-Linux', 'VirtualMachinePlatform') {
+    $state = (Get-WindowsOptionalFeature -Online -FeatureName $feat -ErrorAction SilentlyContinue).State
+    if ($state -ne 'Enabled') {
+        Write-Log "Enabling Windows feature '$feat'..."
+        Enable-WindowsOptionalFeature -Online -FeatureName $feat -All -NoRestart | Out-Null
+        $rebootNeeded = $true
+    }
+}
+
+if ($wslReady -and -not $rebootNeeded) {
+    Write-Log 'WSL is installed.' 'OK'
+    wsl.exe --update 2>&1 | Out-Null
 }
 else {
-    Write-Log 'WSL already present.' 'OK'
+    Write-Log 'Installing WSL (wsl --install)...'
+    wsl.exe --install --no-launch
+    if ($LASTEXITCODE -ne 0) {
+        Write-Log "wsl --install returned exit code $LASTEXITCODE." 'WARN'
+    }
+    $rebootNeeded = $true
 }
 
 Install-WingetPackage -Id 'Docker.DockerDesktop' -Name 'Docker Desktop'
+
+if ($rebootNeeded) {
+    Write-Log 'WSL / Windows features were just enabled - REBOOT now, then re-run this script to finish the container steps.' 'WARN'
+    return
+}
 
 if (-not (Wait-ForDocker)) {
     Write-Log 'Reboot / start Docker Desktop, then re-run this script or containers\Start-*.ps1.' 'WARN'

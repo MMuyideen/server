@@ -30,15 +30,31 @@ function Wait-ForDocker {
         return $false
     }
 
-    Write-Log 'Waiting for the Docker engine to become available...'
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        docker info 2>$null | Out-Null
-        if ($LASTEXITCODE -eq 0) {
-            Write-Log 'Docker engine is ready.' 'OK'
-            return $true
+    # Start Docker Desktop if it is installed but not running.
+    if (-not (Get-Process 'Docker Desktop' -ErrorAction SilentlyContinue)) {
+        $exe = Join-Path $env:ProgramFiles 'Docker\Docker\Docker Desktop.exe'
+        if (Test-Path -LiteralPath $exe) {
+            Write-Log 'Docker Desktop is not running - launching it...'
+            Start-Process -FilePath $exe
         }
-        Start-Sleep -Seconds 5
+    }
+
+    Write-Log "Waiting up to ${TimeoutSeconds}s for the Docker engine..."
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $eap = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'   # native stderr must not throw
+    try {
+        while ((Get-Date) -lt $deadline) {
+            docker info --format '{{.ServerVersion}}' 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Log 'Docker engine is ready.' 'OK'
+                return $true
+            }
+            Start-Sleep -Seconds 5
+        }
+    }
+    finally {
+        $ErrorActionPreference = $eap
     }
     Write-Log "Docker engine not ready after ${TimeoutSeconds}s. Start Docker Desktop and retry." 'WARN'
     return $false
