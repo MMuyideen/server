@@ -33,7 +33,7 @@
 
       <BackupRoot>\Radarr\*.zip   OR  <BackupRoot>\radarr_backup_*.zip
       ...same for Sonarr / Prowlarr / Lidarr / Whisparr / Bazarr
-      <BackupRoot>\qBittorrent\       config tree (qBittorrent.ini, ...)
+      <BackupRoot>\qBittorrent.zip    extracted into %LOCALAPPDATA%
       <BackupRoot>\Jellyfin\          data tree
       <BackupRoot>\clonarr\           /config tree
 
@@ -173,11 +173,11 @@ else {
         Restore-ZipBackup -AppName $app -DataDir $zipApps[$app] -BackupRoot $BackupRoot
     }
 
-    # Folder-tree restores.
-    Restore-FolderBackup -AppName 'qBittorrent' -StopName 'qbittorrent' `
-        -DestDir (Join-Path $env:APPDATA 'qBittorrent') `
-        -BackupDir (Join-Path $BackupRoot 'qBittorrent')
+    # qBittorrent: extract qBittorrent.zip (contains a 'qBittorrent' folder)
+    # straight into %LOCALAPPDATA%.
+    Restore-ZipBackup -AppName 'qBittorrent' -DataDir $env:LOCALAPPDATA -BackupRoot $BackupRoot
 
+    # Folder-tree restores.
     Restore-FolderBackup -AppName 'Jellyfin' -StopName 'JellyfinServer', 'jellyfin' `
         -DestDir (Join-Path $env:ProgramData 'Jellyfin\Server') `
         -BackupDir (Join-Path $BackupRoot 'Jellyfin')
