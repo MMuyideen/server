@@ -1,7 +1,0 @@
-# App backups contain API keys, indexer credentials and download-client
-# passwords - keep them out of the repo.
-*_backup_*.zip
-*.zip
-backups/
-BackupRoot/
-data/
